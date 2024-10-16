@@ -18,3 +18,5 @@ Unlike most options for this, you can set metric in userspace, like bash bunny, 
 This patch specifically is for l4t 4.9 kernel, but the code is easily ported to newer, mostly line differences, not code.
 On the nintendo switch, if you want a gadet that sets itself up automatically on connection to PC, see this:
 https://github.com/libretro/Lakka-LibreELEC/blob/Lakka-v5.x/projects/L4T/devices/Switch/packages/usb-gadget-scripts/udev.d/92-usb-gadgets.rules
+
+I should also mention, i did not add the bash bunny background framework. All this is is my recreation of the gadget setup script they used, made to work as it did on the device. I did document other devices than they used as well, even if they arent used by the bash bunny.
