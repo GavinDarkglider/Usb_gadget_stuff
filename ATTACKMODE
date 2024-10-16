@@ -1,0 +1,644 @@
+#!/bin/bash
+#Gadget Framework Usage
+#gadget_framework.sh [arg1] [value] [arg2] [value] ...
+
+#Valid Arguments
+#create - Create a new gadget framework
+#add	-    Add a new gadget type to framework
+#del -    Remove Gadget from framework
+#up - bring gadget up
+#down - bring gadget down
+
+#add - types
+#	HID_Key - Keyboard
+#	HID_Mouse - Mouse
+#	HID_Joy - Joystick
+#	Storage - CDROM or Mass Storage
+#	Net_RNDIS - Ethernet(Windows)
+#	Net_ECM - Ethernet(Linux)
+#	Net_EEM - Ethernet(Not sure) # look into
+#	Sound1 - UAC1 Audio(USB Sound Card v.1)
+#	Sound2 - UAC2 Audio(USB Sound Card v.2)
+#	Serial_ACM - ACM serial interface
+#	Printer - USB printer
+
+#This script was written by Gavin_Darkglider
+#I release this script under the GPLv2 Licence. 
+#If you use it, modify it in any way, etc, make sure
+#I get credit.
+
+#I take no responsibility if this script causes damage to your
+#device, which it shouldnt, but, just in case it needs to be said.
+
+#I also take no responsibility if you use this script to do something
+#illegal. I wrote this, because the configfs gadget framwork is poorly documented
+#and to save my self a ton of time setting up new a different gadget configurations.
+
+#Some devices I have no idea the proper setup for, so those I will leave with default
+#options, and allow you to set them up when you create them. 
+#Feel free to drop me a line on github, where you probably got this script, if you know how make it better.
+
+#Shout out to Darren, Mubix, Sharon, Seb, and the rest of the Hak5 team, without the bashbunny, I would have never 
+#dug into the depths of the USB configfs gadget framework, and would have never written this. Also love your podcasts.... been watching them
+#for what feels like forever now, and they have been educational to say the least. 
+
+#For those who havnt watched the shows, get online, and check out Hak5, Threatwire, Tek Thing, and Metasploit (Usually more than a minute) Minute
+#A lot of great information is shared on them, for a lot of different computer/tech baseed topics.
+
+#I am only adding support for modules that are included in the vanilla kernel. Debian has an MTP module in the kernel, and
+#someone wrote a module UAC3(Usb Audio) protocol, but since it isnt upstream yet, I am not messing with it.
+
+#As for the ATTACKMODE RNDIS_Speed changes, there is no way to easily change the speed reported using configFS, without
+#patching the usb_f_rndis module, as that is hardcoded from what I can tell. I will
+#poke at the code there, and see if I can break out a speed variable in configfs. Until then, while the script will accept
+#RNDIS_SPEED_* if running in ATTACKMODE, and set the variable, it doesnt actually do anything, as of this moment in time.
+
+######################################
+#USB Gadget Framework Settings       #
+######################################
+#These are the base modules you need to create a gadget with config fs.
+#Change to match the system you are working with. Also, this needs to be in
+#the order that you would unload the modules, or it will cause issues
+#destroying the gadget framework. This is the default configuration
+#for the UP board, which I designed this script on. 
+#What ever you do, do not add any of the usb_f_* modules to this list. Loading
+#and unloading those is handled by the script, as they are universal on all
+#boards, and if not loaded in the correct order could cause issues with some
+#operating systems...Cough:Windows:Cough...... Fucking Microsoft..... lol.
+
+gadget_framework_modules=("libcomposite")
+
+#Path to Configfs mount point
+
+gadget_config="/sys/kernel/config"
+
+#UDC Variable- If using a device with more than one UDC module loaded,
+#You will have to specify which one to use. 
+#udc=$(ls /sys/class/udc)
+udc="700d0000.xudc"
+
+#This can be changed but it needs a full path to a block device
+#or image file. This only is used if running as ATTACKMODE
+#gadget_setup.sh is more dynamic, and allows setting this on the command line
+
+#bunny_storage_mount_file="./test.img"
+bunny_storage_mount_file="/root/windows7.img"
+output_folder=/tmp
+leasefile="/var/lib/dhcp/dhcpd.usb0.leases"
+
+
+#Manufacturer and Product the device reports to OS. Doesnt really matter what you put here.
+manufacturer="Who Ever Owns This"
+product="Pure Awesomeness"
+#vid/pid defaults if not ran as attackmode.... Defaults are default for linux
+vid_default="0x1d6b" #linux foundation
+pid_default="0x0104" #Multifunction Gadget
+
+#Edit these if you want, they are the defaults from the BashBunny ATTACKMODE Script
+serialnumber_bb="ch000001"
+host_addr_bb="5a:00:00:33:44:55"
+dev_addr_bb="5a:00:00:5a:5a:00"
+vid_default_attack="0xf000"
+pid_default_attack="0xfeff"
+pid_setup_mode="0xfff0"
+pid_hid_only="0xff01"
+pid_hid_storage="0xff02"
+pid_hid_rndis="0xff03"
+pid_hid_ecm="0xff04"
+pid_hid_storage_rndis="0xff05"
+pid_hid_storage_ecm="0xff06"
+pid_serial_rndis="0xff07"
+pid_serial_ecm="0xff08"
+pid_storage_only="0xff10"
+pid_serial_only="0xff11"
+vid_rndis_only="0x04b3"
+pid_rndis_only="0x4010"
+pid_ecm_only="0xff13"
+pid_hid_serial="0xff14"
+pid_storage_rndis="0xff20"
+pid_storage_ecm="0xff21"
+
+##########################################
+#Do Not Change after This line           #
+#Functions                               #
+##########################################
+
+usage() {
+	if [ "x$1" = "xattack" ]; then
+		echo "Usage: ATTACKMODE <mode1> [mode2] [mode3]"
+		echo "This is an added bonus in the gadget_setup.sh"
+		echo "I present to you an almost fully working Bash Bunny "
+		echo "ATTACKMODE script"
+		echo "RNDIS Speed reporting is hardcoded into the kernel, so"
+		echo "we cant change it without patching the kernel.         "
+		echo "On Windows 7 and possibly 8, you might need a "
+		echo "generic CDC Serial driver for tty on serial to work" 
+		echo "This is not needed on Windows 10"
+		echo
+		echo "List of supported combinations of attack modes are:"
+		echo "  ATTACKMODE SERIAL STORAGE               (this is setup mode)"
+		echo "                                          (vid/pid: 0xF000/0xFFF0)"
+		echo
+		echo "  ATTACKMODE HID                          (vid/pid: 0xF000/0xFF01)"
+		echo "  ATTACKMODE STORAGE						(vid/pid: 0xF000/0xFF10)"
+		echo "  ATTACKMODE SERIAL						(vid/pid: 0xF000/0xFF11)"
+		echo "  ATTACKMODE RNDIS_ETHERNET               (For Windows)"
+		echo "                                          (vid/pid: 0xF000/0xFF12)"
+		echo "  ATTACKMODE ECM_ETHERNET                 (for Mac and Linux)"
+		echo "                                          (vid/pid: 0xF000/0xFF13)"
+		echo "  ATTACKMODE HID SERIAL                   (vid/pid: 0xF000/0xFF14)"
+		echo "  ATTACKMODE HID STORAGE                  (vid/pid: 0xF000/0xFF02)"
+		echo "  ATTACKMODE HID RNDIS_ETHERNET           (For Windows)"
+		echo "                                          (vid/pid: 0xF000/0xFF03)"
+		echo "  ATTACKMODE HID ECM_ETHERNET             (for Mac and Linux)"
+		echo "                                          (vid/pid: 0xF000/0xFF04)"
+		echo "  ATTACKMODE HID STORAGE RNDIS_ETHERNET   (For Windows)"
+		echo "                                          (vid/pid: 0xF000/0xFF05)"
+		echo "  ATTACKMODE HID STORAGE ECM_ETHERNET     (for Mac and Linux)"
+		echo "                                          (vid/pid: 0xF000/0xFF06)"
+		echo "  ATTACKMODE SERIAL RNDIS_ETHERNET        (For Windows)"
+		echo "                                          (vid/pid: 0xF000/0xFF07)"
+		echo "  ATTACKMODE SERIAL ECM_ETHERNET          (for Mac and Linux)"
+		echo "                                          (vid/pid: 0xF000/0xFF08)"
+		echo "  ATTACKMODE STORAGE RNDIS_ETHERNET       (For Windows)"
+		echo "                                          (vid/pid: 0xF000/0xFF20)"
+		echo "  ATTACKMODE STORAGE ECM_ETHERNET         (for Mac and Linux)"
+		echo "                                          (vid/pid: 0xF000/0xFF21)"
+		echo "  un-supported                            (vid/pid: 0xF000/0xFEFF)"
+	elif [ "x$1"= "xgadget" ]; then
+		echo "Gadget_setup.sh help"
+	fi
+}
+
+check_configfs() {
+	#Simple function to see if our gadget has been created in configfs
+	local gadget_exist=""
+	if [ -d "$gadget_config/usb_gadget/g" ]; then
+		local gadget_exist="1"
+	fi
+	echo $gadget_exist
+}
+#Gadget Framework Functions
+create_gadget_framework() {
+	#Load required modules if needed
+	if [ ! -d "$gadget_config/usb_gadget" ]; then
+		for i in "${gadget_framework_modules[@]}"
+		do	
+			echo 1 > /dev/null
+			modprobe $i
+		done
+	fi
+	#create basic gadget framework to work with
+	mkdir -p $gadget_config/usb_gadget/g
+	chmod -R 666 $gadget_config/usb_gadget/g
+	echo $vid_default > $gadget_config/usb_gadget/g/idVendor  
+	echo $pid_default > $gadget_config/usb_gadget/g/idProduct
+	echo 0x0100 > $gadget_config/usb_gadget/g/bcdDevice # v1.0.0
+	echo 0x0200 > $gadget_config/usb_gadget/g/bcdUSB    # USB 2.0
+	mkdir -p $gadget_config/usb_gadget/g/strings/0x409
+	echo $serialnumber > $gadget_config/usb_gadget/g/strings/0x409/serialnumber
+	echo $manufacturer > $gadget_config/usb_gadget/g/strings/0x409/manufacturer
+	echo $product  > $gadget_config/usb_gadget/g/strings/0x409/product
+ 	echo 0xEF > $gadget_config/usb_gadget/g/bDeviceClass
+	echo 0x02 > $gadget_config/usb_gadget/g/bDeviceSubClass
+	echo 0x01 > $gadget_config/usb_gadget/g/bDeviceProtocol
+	mkdir -p $gadget_config/usb_gadget/g/configs/c.1
+	echo 250 > $gadget_config/usb_gadget/g/configs/c.1/MaxPower	
+}
+
+destroy_gadget_framework() {
+	rmdir $gadget_config/usb_gadget/g/configs/c.1
+	rmdir $gadget_config/usb_gadget/g/strings/0x409
+	rmdir $gadget_config/usb_gadget/g
+	for i in "${gadget_framework_modules[@]}"
+	do	
+		echo 1 > /dev/null
+		rmmod $i
+	done
+
+}
+
+finalize_gadget_framework() {
+	echo $udc > $gadget_config/usb_gadget/g/UDC
+	udevadm settle -t 5 || :
+}
+
+#Actual Gadget Functions
+
+create_hid() {
+	mkdir -p $gadget_config/usb_gadget/g/functions/hid.usb0
+	echo 1 > $gadget_config/usb_gadget/g/functions/hid.usb0/protocol
+	echo 1 > $gadget_config/usb_gadget/g/functions/hid.usb0/subclass
+	echo 8 > $gadget_config/usb_gadget/g/functions/hid.usb0/report_length
+	echo -ne \\x05\\x01\\x09\\x06\\xa1\\x01\\x05\\x07\\x19\\xe0\\x29\\xe7\\x15\\x00\\x25\\x01\\x75\\x01\\x95\\x08\\x81\\x02\\x95\\x01\\x75\\x08\\x81\\x03\\x95\\x05\\x75\\x01\\x05\\x08\\x19\\x01\\x29\\x05\\x91\\x02\\x95\\x01\\x75\\x03\\x91\\x03\\x95\\x06\\x75\\x08\\x15\\x00\\x25\\x65\\x05\\x07\\x19\\x00\\x29\\x65\\x81\\x00\\xc0 > $gadget_config/usb_gadget/g/functions/hid.usb0/report_desc
+	ln -s $gadget_config/usb_gadget/g/functions/hid.usb0 $gadget_config/usb_gadget/g/configs/c.1/
+}
+
+destroy_hid() {
+	rm $gadget_config/usb_gadget/g/configs/c.1/hid.usb0
+	rmdir $gadget_config/usb_gadget/g/functions/hid.usb0
+	rmmod usb_f_hid
+}
+
+destroy_storage() {
+	rm $gadget_config/usb_gadget/g/configs/c.1/mass_storage.0
+	echo "" > $gadget_config/usb_gadget/g/functions/mass_storage.0/lun.0/file
+	rmdir $gadget_config/usb_gadget/g/functions/mass_storage.0/
+	rmmod usb_f_mass_storage
+}
+
+create_storage() {
+	mkdir $gadget_config/usb_gadget/g/functions/mass_storage.0
+}
+
+mount_storage() {
+	case $1 in
+		"cdrom")
+			#Init Pid, no functions defined yet
+			echo 1 > $gadget_config/usb_gadget/g/functions/mass_storage.0/lun.0/cdrom
+			echo 0 > $gadget_config/usb_gadget/g/functions/mass_storage.0/lun.0/removable
+			echo $2 > $gadget_config/usb_gadget/g/functions/mass_storage.0/lun.0/file
+			echo "It should be known, that without custom patches to the kernel, this feature"
+			echo "will not work with disc images over 2.5GB. This is due to ISO cdrom standards"
+			echo "so the driver will truncate any data stored after the 2.5GB from the beginning"
+			echo "of the disc. You have been warned. The easiest patch is to patch out the size "
+			echo "limit, in the kernel source code. This is a dirty hack though, while it works"
+			echo "it might cause issues with CD's that have audio and data tracks. So patch it"
+			echo "at your own risk. Working patch can be found here:"
+			echo "https://lkml.org/lkml/2015/3/7/388"
+			;;
+		"ro")
+			echo 1 > $gadget_config/usb_gadget/g/functions/mass_storage.0/lun.0/ro
+			echo 1 > $gadget_config/usb_gadget/g/functions/mass_storage.0/lun.0/removable
+			echo $2 > $gadget_config/usb_gadget/g/functions/mass_storage.0/lun.0/file
+			;;
+		*)
+			echo 1 > $gadget_config/usb_gadget/g/functions/mass_storage.0/lun.0/removable
+			echo $1 > $gadget_config/usb_gadget/g/functions/mass_storage.0/lun.0/file
+			;;
+	esac
+	ln -s $gadget_config/usb_gadget/g/functions/mass_storage.0 $gadget_config/usb_gadget/g/configs/c.1
+}
+
+create_serial() {
+	mkdir -p $gadget_config/usb_gadget/g/functions/acm.usb0
+	ln -s $gadget_config/usb_gadget/g/functions/acm.usb0 $gadget_config/usb_gadget/g/configs/c.1/
+}
+
+destroy_serial() {
+	/etc/init.d/agetty.ttyGS0 stop
+	rm $gadget_config/usb_gadget/g/configs/c.1/acm.usb0
+	rmdir $gadget_config/usb_gadget/g/functions/acm.usb0
+	rmmod usb_f_acm
+	rmmod u_serial 
+}
+
+create_rndis() {
+	echo 1 > $gadget_config/usb_gadget/g/os_desc/use
+	echo 0xcd > $gadget_config/usb_gadget/g/os_desc/b_vendor_code
+	echo MSFT100 > $gadget_config/usb_gadget/g/os_desc/qw_sign
+	mkdir -p $gadget_config/usb_gadget/g/functions/rndis.usb0
+	echo RNDIS   > $gadget_config/usb_gadget/g/functions/rndis.usb0/os_desc/interface.rndis/compatible_id
+	echo 5162001 > $gadget_config/usb_gadget/g/functions/rndis.usb0/os_desc/interface.rndis/sub_compatible_id
+	[[ "x$1" != "x" ]] && [[ -f $gadget_config/usb_gadget/g/functions/rndis.usb0/usebit ]] && echo 1 > $gadget_config/usb_gadget/g/functions/rndis.usb0/usebit && echo $1 > $gadget_config/usb_gadget/g/functions/rndis.usb0/cbitrate
+	[[ "x$1" != "x" ]] && [[ ! -f $gadget_config/usb_gadget/g/functions/rndis.usb0/usebit ]] && echo "Need a patch in the kernel to set bitrate, speed unaltered"
+	[[ "x$dev_addr" != "x" ]] && echo $dev_addr > $gadget_config/usb_gadget/g/functions/rndis.usb0/dev_addr 
+	[[ "x$host_addr" != "x" ]] && echo $host_addr > $gadget_config/usb_gadget/g/functions/rndis.usb0/host_addr
+	ln -s $gadget_config/usb_gadget/g/functions/rndis.usb0 $gadget_config/usb_gadget/g/configs/c.1/
+	ln -s $gadget_config/usb_gadget/g/configs/c.1 $gadget_config/usb_gadget/g/os_desc
+}
+
+destroy_rndis() {
+	rm $gadget_config/usb_gadget/g/configs/c.1/rndis.usb0
+	rm $gadget_config/usb_gadget/g/os_desc/c.1
+	rmdir $gadget_config/usb_gadget/g/functions/rndis.usb0
+	rmmod usb_f_rndis
+	[[ "x$(lsmod | grep usb_f_rdnis)" = "x" ]] || [[ "x$(lsmod | grep usb_f_ecm)" = "x" ]] || [[ "x$(lsmod | grep usb_f_eem)" = "x" ]] && rmmod u_ether
+}
+
+create_ecm() {
+	mkdir -p $gadget_config/usb_gadget/g/functions/ecm.usb0
+	[[ "x$dev_addr" != "x" ]] && echo $dev_addr > $gadget_config/usb_gadget/g/functions/ecm.usb0/dev_addr
+	[[ "x$host_addr" != "x" ]] && echo $host_addr > $gadget_config/usb_gadget/g/functions/ecm.usb0/host_addr
+	[[ "x$1" != "x" ]] && [[ -f $gadget_config/usb_gadget/g/functions/ecm.usb0/usebit ]] && echo 1 > $gadget_config/usb_gadget/g/functions/ecm.usb0/usebit && echo $1 > $gadget_config/usb_gadget/g/functions/ecm.usb0/cbitrate
+	[[ "x$1" != "x" ]] && [[ ! -f $gadget_config/usb_gadget/g/functions/ecm.usb0/usebit ]] && echo "Need a patch in the kernel to set bitrate, speed unaltered"
+
+	ln -s $gadget_config/usb_gadget/g/functions/ecm.usb0 $gadget_config/usb_gadget/g/configs/c.1/
+}
+
+destroy_ecm() {
+	rm $gadget_config/usb_gadget/g/configs/c.1/ecm.usb0
+	rmdir $gadget_config/usb_gadget/g/functions/ecm.usb0
+	rmmod usb_f_ecm
+	[[ "x$(lsmod | grep usb_f_rdnis)" = "x" ]] || [[ "x$(lsmod | grep usb_f_ecm)" = "x" ]] || [[ "x$(lsmod | grep usb_f_eem)" = "x" ]] && rmmod u_ether
+}
+
+create_midi() {
+	mkdir -p $gadget_config/usb_gadget/g/functions/midi.usb0
+	echo "usb-midi-gadget" > $gadget_config/usb_gadget/g/functions/midi.usb0/id
+	ln -s $gadget_config/usb_gadget/g/functions/midi.usb0 $gadget_config/usb_gadget/g/configs/c.1/
+}
+
+destroy_midi() {
+	rm $gadget_config/usb_gadget/g/configs/c.1/midi.usb0
+	rmdir $gadget_config/usb_gadget/g/functions/midi.usb0
+	rmmod usb_f_midi
+	rmmod snd_rawmidi
+	rmmod snd_seq_device
+}
+
+create_uac1 () {
+	mkdir -p $gadget_config/usb_gadget/g/functions/uac1.usb0
+	ln -s $gadget_config/usb_gadget/g/functions/uac1.usb0 $gadget_config/usb_gadget/g/configs/c.1/
+}
+
+destroy_uac1 () {
+	rm $gadget_config/usb_gadget/g/configs/c.1/uac1.usb0
+	rmdir $gadget_config/usb_gadget/g/functions/uac1.usb0
+	rmmod usb_f_uac1
+	[[ "x$(lsmod | grep usb_f_uac)" = "x" ]] && rmmod u_audio
+}
+
+create_uac2 () {
+	mkdir -p $gadget_config/usb_gadget/g/functions/uac2.usb0
+	ln -s $gadget_config/usb_gadget/g/functions/uac2.usb0 $gadget_config/usb_gadget/g/configs/c.1/
+}
+
+destroy_uac2 () {
+	rm $gadget_config/usb_gadget/g/configs/c.1/uac2.usb0
+	rmdir $gadget_config/usb_gadget/g/functions/uac2.usb0
+	rmmod usb_f_uac2
+	[[ "x$(lsmod | grep usb_f_uac)" = "x" ]] && rmmod u_audio
+}
+
+destroy_all_gadgets() {
+if [ ! x$(check_configfs) == "x" ]; then
+	#First disconnect gadget from usb port
+	echo "" > $gadget_config/usb_gadget/g/UDC
+	
+	#Since gadget exists we must destroy it
+	#to do this, we must first destroy all 
+	#devices attached to it
+	for d  in $gadget_config/usb_gadget/g/functions/*/ ; do
+		case $(basename ${d}) in
+			ecm.usb0)
+				/etc/init.d/dhcpd.usb0 stop
+				ifconfig usb0 down
+				destroy_ecm
+				;;
+			rndis.usb0)
+				/etc/init.d/dhcpd.usb0 stop
+				ifconfig usb0 down
+				destroy_rndis
+				;;	
+			hid.usb0)
+				destroy_hid
+				;;
+			acm.usb0)
+				destroy_serial
+				;;
+			mass_storage.0)
+				destroy_storage
+				;;
+			midi.usb0)
+				destroy_midi
+				;;
+			uac1.usb0)
+				destroy_uac1
+				;;
+			uac2.usb0)
+				destroy_uac2
+				;;
+		esac
+	done
+	destroy_gadget_framework
+fi
+}
+parse_mode() {
+	if [ "x$1" = "x" ] || [ "x$2" = "x" ] ; then
+		#If values are not passed, exit function
+		return
+	fi
+	if [ "x$1" = "xattack" ]; then
+		case $2 in
+		HID)
+			has_hid=1
+			;;
+		STORAGE)
+			has_storage=1
+			;;
+		RO_STORAGE)
+			has_storage=1
+			has_rostorage=1
+			;;
+		RNDIS_ETHERNET)
+			has_net=1
+			is_win=1
+			;;
+		ECM_ETHERNET)
+			has_net=1
+			is_win=
+			;;
+		SERIAL)
+			has_serial=1
+			;;
+		VID_*)
+			str_vid_custom=$2
+			str_vid_custom=${str_vid_custom#VID_}
+			;;
+		PID_*)
+			str_pid_custom=$2
+			str_pid_custom=${str_pid_custom#PID_}
+			;;
+		SN_*)
+			str_sn_custom=$2
+			str_sn_custom=${str_sn_custom#SN_}
+			;;
+		MAN_*)
+			str_man_custom=$2
+			str_man_custom=${str_man_custom#MAN_}
+			;;
+		PRODUCT_*)
+			str_product_custom=$2
+			str_product_custom=${str_product_custom#PRODUCT_}
+			;;
+		RNDIS_SPEED_*)
+			echo "RNDIS_SPEED_* doesnt change anything without custom patch"
+			str_speed_custom=$2
+			str_speed_custom=${str_speed_custom#RNDIS_SPEED_}
+			;;
+		OFF)
+			destroy_all_gadgets
+			exit 1
+			;;
+		SETUP)
+			has_serial=1
+			has_storage=1
+			;;
+		UAC1)
+			has_uac1=1
+			;;
+		esac
+elif [ "x$1" = "xgadget" ]; then
+	echo gadget frame work parse here.
+fi
+}
+
+create_gadgets() {
+
+	if [ "x$1" = "xattack" ]; then	
+		############################################
+		#If running as ATTACKMODE                  #
+		############################################	
+		#run basic checks, such as modules being loaded
+		#and make sure we dont have any gadgets defined
+		#check_modules
+
+		destroy_all_gadgets
+
+		#Create a new gadget base framework
+		create_gadget_framework		
+		
+		#Set VID/PID/dev_addr/host_addr defaults for BashBunny
+		echo $vid_default_attack > $gadget_config/usb_gadget/g/idVendor  
+		echo $pid_default_attack > $gadget_config/usb_gadget/g/idProduct
+		host_addr=$host_addr_bb
+		dev_addr=$dev_addr_bb
+		###############################################
+		#If we have an RNDIS network adapter in the   #
+		#composite stack, we have to load network     #
+		#module first, or windoze will fail to        #
+		#start device with error 10 in Device         # 
+		#Manager. This is due, to where RNDIS is      #
+		#placed in the composite header. libcomposite #
+		#orders this by the order the devices are     #
+		#created. If you ask me the kernel people      #
+		# should really fix that, but such is life... #
+		###############################################
+		#override RNDIS speed In attackmode we always want to do this, we can adjust the value down with a custom speed, if needed. needs to be set
+		#before we add device to c.1, which is done in create_rndis.
+		rndis_speed="2147483" # Default BashBunny speed is 2.0Gbps, so default around there
+		[[ "x$has_net" = "x1" ]] && [[ "x$is_win" = "x1" ]] && [[ "x$str_speed_custom" != "x" && $str_speed_custom =~ ^-?[0-9]+$ && "$str_speed_custom" -gt "0" ]] && rndis_speed="$str_speed_custom"
+		[[ "x$has_net" = "x1" ]] && [[ "x$is_win" = "x" ]] && [[ "x$str_speed_custom" != "x" && $str_speed_custom =~ ^-?[0-9]+$ && "$str_speed_custom" -gt "0" ]] && rndis_speed="$str_speed_custom"
+		#Create Devices
+		[[ "x$has_net" = "x1" ]] && [[ "x$is_win" = "x1" ]] && create_rndis $rndis_speed 
+		[[ "x$has_net" = "x1" ]] && [[ "x$is_win" = "x" ]] && create_ecm $rndis_speed
+		[[ "x$has_hid" = "x1" ]] && create_hid
+		[[ "x$has_uac1" = "x1" ]] && create_uac1
+		[[ "x$has_storage" = "x1" ]] && create_storage && mount_storage $bunny_storage_mount_file
+		[[ "x$has_rostorage" = "x1" ]] && create_storage && mount_storage ro $bunny_storage_mount_file
+		[[ "x$has_serial" = "x1" ]] && create_serial
+		#Set VID/PID information based upon what configuration of devices you have chosen
+		[[ "x$has_hid" = "x" ]] && [[ "x$has_storage" = "x1" ]] && [[ "x$has_net" = "x" ]] && [[ "x$has_serial" = "x1" ]] &&  echo "setup mode, storage + serial" && echo $pid_setup_mode > $gadget_config/usb_gadget/g/idProduct
+		[[ "x$has_hid" = "x1" ]] && [[ "x$has_storage" = "x" ]] && [[ "x$has_net" = "x" ]] && [[ "x$has_serial" = "x" ]] && echo "hid only" && echo $pid_hid_only > $gadget_config/usb_gadget/g/idProduct
+		[[ "x$has_hid" = "x" ]] && [[ "x$has_storage" = "x1" ]] && [[ "x$has_net" = "x" ]] && [[ "x$has_serial" = "x" ]] && echo "storage only" && echo $pid_storage_only > $gadget_config/usb_gadget/g/idProduct
+		[[ "x$has_hid" = "x" ]] && [[ "x$has_storage" = "x" ]] && [[ "x$has_net" = "x" ]] && [[ "x$has_serial" = "x1" ]] && echo "serial only" && echo $pid_serial_only > $gadget_config/usb_gadget/g/idProduct
+		[[ "x$has_hid" = "x" ]] && [[ "x$has_storage" = "x" ]] && [[ "x$has_net" = "x1" ]] && [[ "x$has_serial" = "x" ]] && [[ "x$is_win" = "x1" ]] && echo "rndis_ethernet" && echo $vid_rndis_only > $gadget_config/usb_gadget/g/idVendor && echo $pid_rndis_only > $gadget_config/usb_gadget/g/idProduct
+		[[ "x$has_hid" = "x" ]] && [[ "x$has_storage" = "x" ]] && [[ "x$has_net" = "x1" ]] && [[ "x$has_serial" = "x" ]] && [[ "x$is_win" = "x" ]] && echo "cdc_ethernet" && echo $pid_ecm_only > $gadget_config/usb_gadget/g/idProduct
+		[[ "x$has_hid" = "x1" ]] && [[ "x$has_storage" = "x1" ]] && [[ "x$has_net" = "x" ]] && [[ "x$has_serial" = "x" ]] && echo "hid + storage" && echo $pid_hid_storage > $gadget_config/usb_gadget/g/idProduct
+		[[ "x$has_hid" = "x1" ]] && [[ "x$has_storage" = "x" ]] && [[ "x$has_net" = "x" ]] && [[ "x$has_serial" = "x1" ]] && echo "hid + serial" && echo $pid_hid_serial > $gadget_config/usb_gadget/g/idProduct
+		[[ "x$has_hid" = "x1" ]] && [[ "x$has_storage" = "x" ]] && [[ "x$has_net" = "x1" ]] && [[ "x$has_serial" = "x" ]] && [[ "x$is_win" = "x1" ]] && echo "hid + rndis_ethernet" &&  echo $pid_hid_rndis > $gadget_config/usb_gadget/g/idProduct;
+		[[ "x$has_hid" = "x1" ]] && [[ "x$has_storage" = "x" ]] && [[ "x$has_net" = "x1" ]] && [[ "x$has_serial" = "x" ]] && [[ "x$is_win" = "x" ]] && echo "hid + ecm_ethernet" && echo $pid_hid_ecm > $gadget_config/usb_gadget/g/idProduct
+		[[ "x$has_hid" = "x1" ]] && [[ "x$has_storage" = "x1" ]] && [[ "x$has_net" = "x1" ]] && [[ "x$has_serial" = "x" ]] && [[ "x$is_win" = "x1" ]] && echo "hid + storage + rndis_ethernet" && echo $pid_hid_storage_rndis > $gadget_config/usb_gadget/g/idProduct
+		[[ "x$has_hid" = "x1" ]] && [[ "x$has_storage" = "x1" ]] && [[ "x$has_net" = "x1" ]] && [[ "x$has_serial" = "x" ]] && [[ "x$is_win" = "x" ]] && echo "hid + storage + ecm_ethernet" && echo $pid_hid_storage_ecm > $gadget_config/usb_gadget/g/idProduct
+		[[ "x$has_hid" = "x" ]] && [[ "x$has_storage" = "x" ]] && [[ "x$has_net" = "x1" ]] && [[ "x$has_serial" = "x1" ]] && [[ "x$is_win" = "x1" ]] && echo "serial + rndis_ethernet" && echo $pid_serial_rndis > $gadget_config/usb_gadget/g/idProduct
+		[[ "x$has_hid" = "x" ]] && [[ "x$has_storage" = "x" ]] && [[ "x$has_net" = "x1" ]] && [[ "x$has_serial" = "x1" ]] && [[ "x$is_win" = "x" ]] && echo "serial + ecm_ethernet" && echo $pid_serial_ecm > $gadget_config/usb_gadget/g/idProduct
+		[[ "x$has_hid" = "x" ]] && [[ "x$has_storage" = "x1" ]] && [[ "x$has_net" = "x1" ]] && [[ "x$has_serial" = "x" ]] && [[ "x$is_win" = "x1" ]] && echo "storage + rndis_ethernet" && echo $pid_storage_rndis > $gadget_config/usb_gadget/g/idProduct
+		[[ "x$has_hid" = "x" ]] && [[ "x$has_storage" = "x1" ]] && [[ "x$has_net" = "x1" ]] && [[ "x$has_serial" = "x" ]] && [[ "x$is_win" = "x" ]] && echo "storage + ecm_ethernet" && echo $pid_storage_ecm > $gadget_config/usb_gadget/g/idProduct
+		[[ "x$(cat ${gadget_config}/usb_gadget/g/idProduct)" = "x$pid_default_attack" ]] && echo "unsupported, use default"
+		#Override Functions(VID/PID/Serial/Manufacturer/Product information)
+		[[ "x$str_vid_custom" != "x" ]] && [[ "x$str_pid_custom" != "x" ]] && echo $str_vid_custom > $gadget_config/usb_gadget/g/idVendor && echo $str_pid_custom > $gadget_config/usb_gadget/g/idProduct
+		[[ "x$str_man_custom" != "x" ]] && echo $str_man_custom > $gadget_config/usb_gadget/g/strings/0x409/manufacturer
+		[[ "x$str_product_custom" != "x" ]] && echo $str_product_custom > $gadget_config/usb_gadget/g/strings/0x409/product
+		[[ "x$str_sn_custom" != "x" ]] && echo $str_sn_custom > $gadget_config/usb_gadget/g/strings/0x409/serialnumber
+		#finalize_gadget/bring to life
+		finalize_gadget_framework
+		#Setup services for Network/Serial if needed
+		post_setup
+	elif [ "x$1" == "gadget" ]; then
+		echo put full gadget framework stuff here.
+	fi
+	
+}
+
+post_setup() {
+
+	rm -rf /var/lib/dhcp/dhcpd.usb0.leases*
+
+	if [ "x$has_net" = "x1" ]; then
+		# bring up usb0 and start dhcp server
+		ifconfig usb0 172.16.64.1 netmask 255.255.255.0; ifconfig usb0 up
+		sleep 1
+		/etc/init.d/dhcpd.usb0 start
+
+		loop_dhcp_lease
+		ret=$?
+
+		[[ "x$is_auto" != "x" ]] && {
+			[[ "$ret" == "1" ]] && {
+				$(echo $CMD | sed 's/AUTO_ETHERNET/RNDIS_ETHERNET/gI')
+				exit
+			}
+		}
+
+		echo TARGET_IP = $TARGET_IP, TARGET_HOSTNAME = $TARGET_HOSTNAME, HOST_IP = $HOST_IP
+	fi
+
+	[[ "x$has_serial" != "x" ]] && sleep 1.5 && /etc/init.d/agetty.ttyGS0 start
+}
+
+check_dhcp_target_ip() {
+	target_ip=$(cat $leasefile | grep ^lease | awk '{ print $2 }' | sort | uniq | tail -n 1)
+	target_hostname=$(cat $leasefile | grep hostname | awk '{print $2 }' \
+			| uniq | tail -n1 | sed "s/^[ \t]*//" | sed 's/\"//g' | sed 's/;//')
+}
+
+# timeout = 20 seconds
+loop_dhcp_lease() {
+	rm -rf $output_folder/dhcp.time.txt
+
+	timeout=20
+	[[ "x$str_timeout_custom" != "x" ]] && [[ "x$is_auto" != "x" ]] && {
+		timeout=$str_timeout_custom
+	}
+
+	for i in `seq $timeout`;
+	do
+		check_dhcp_target_ip
+		if [ "x$target_ip" != "x" ] && [ "x$target_hostname" != "x$(cat /etc/conf.d/hostname | tail -n 1 | awk -F'=' '{print $2}' | tr -d '"')" ]; then
+			TARGET_IP=$target_ip
+			TARGET_HOSTNAME=$target_hostname
+			HOST_IP=$(ifconfig usb0 | grep "inet " | awk '{ print $2 }')
+			echo "got dhcp ip address after $i seconds"
+			echo "got dhcp ip address after $i seconds" > $output_folder/dhcp.time.txt
+			return 0
+			
+		fi
+
+		sleep 1
+	done
+
+	return 1
+}
+##########################################
+#Script                                  #
+##########################################
+
+#Deal with Arguments
+# If there is no argument, print usage and exit.
+if [ "x$1" = "x" ] ; then
+	[[ "x$(basename ${0})" = "xATTACKMODE" ]] && usage attack
+	[[ "x$(basename ${0})" = "xgadget_setup.sh" ]] && usage gadget
+	exit 1
+fi
+for arg in "$@"
+do
+	[[ "x$(basename ${0})" = "xATTACKMODE" ]] && parse_mode attack $(echo $arg | awk '{print toupper($0)}')
+	[[ "x$(basename ${0})" = "xgadget_setup.sh" ]] && parse_mode gadget $(echo $arg | awk '{print toupper($0)}')
+done
+
+
+
+#Create devices specified
+[[ "x$(basename ${0})" = "xATTACKMODE" ]] && create_gadgets attack
+[[ "x$(basename ${0})" = "xgadget_setup.sh" ]] && create_gadgets gadget
